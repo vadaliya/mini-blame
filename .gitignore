@@ -1,0 +1,12 @@
+# Node dependencies (Downloaded automatically via npm install)
+node_modules/
+
+# Compiled code (Generated automatically from your TypeScript files)
+out/
+
+# Packaged extension files (Archives)
+*.zip
+
+# OS generated files (Good practice to include)
+.DS_Store
+Thumbs.db

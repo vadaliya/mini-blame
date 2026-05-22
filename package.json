@@ -1,0 +1,57 @@
+{
+  "name": "mini-blame",
+  "displayName": "mini-blame",
+  "description": "",
+  "version": "0.0.1",
+  "publisher": "bhargav-vadaliya",
+  "icon": "mini-blame_icon.png",
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+        "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mini-blame.copyText",
+        "title": "Copy Text"
+      },
+      {
+        "command": "mini-blame.openDiff",
+        "title": "Open Commit Diff"
+      },
+      {
+        "command": "mini-blame.moreActions",
+        "title": "More Actions"
+      },
+      {
+        "command": "mini-blame.openOldFile",
+        "title": "Open Old File"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.19.19",
+    "@types/vscode": "^1.120.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
+    "eslint": "^9.39.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  }
+}
