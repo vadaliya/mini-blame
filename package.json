@@ -2,17 +2,17 @@
   "name": "mini-blame",
   "displayName": "mini-blame",
   "description": "",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "bhargav-vadaliya",
   "icon": "mini-blame_icon.png",
   "engines": {
-    "vscode": "^1.120.0"
+    "vscode": "^1.80.0"
   },
   "categories": [
     "Other"
   ],
   "activationEvents": [
-        "onStartupFinished"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -46,7 +46,7 @@
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.19",
-    "@types/vscode": "^1.120.0",
+    "@types/vscode": "^1.80.0",
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.9.1",

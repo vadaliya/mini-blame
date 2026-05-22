@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // --- 2. EVENT LISTENERS ---
+// --- 2. EVENT LISTENERS ---
 
     // If a file is already open when the extension starts, run the tracker immediately
     if (vscode.window.activeTextEditor) {
@@ -40,6 +40,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Trigger whenever the user clicks around or moves their cursor inside the current file
     vscode.window.onDidChangeTextEditorSelection(e => updateDecoration(e.textEditor));
+
+    // Hide the blame data the exact millisecond the user starts typing
+    vscode.workspace.onDidChangeTextDocument(e => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && e.document === editor.document) {
+            // Clear the stale decorations and status bar while they are actively editing
+            editor.setDecorations(decorationType, []);
+            statusBarItem.hide();
+        }
+    });
+
+    // Force a fresh Git pull the moment the file is saved
+    vscode.workspace.onDidSaveTextDocument(document => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && document === editor.document) {
+            // Re-run the core function to fetch the newly saved Git data
+            updateDecoration(editor); 
+        }
+    });
 
     /**
      * Core function that fetches Git data for the currently selected line and updates the UI.
@@ -70,9 +89,243 @@ export function activate(context: vscode.ExtensionContext) {
 
             // If hash is all zeros, the line is uncommitted (modified locally). Clear UI and abort.
             if (commitHash.startsWith('00000000')) { 
-                editor.setDecorations(decorationType, []); 
-                statusBarItem.hide(); 
-                return; 
+                // 1. Calculate uncommitted time
+                const stats = fs.statSync(filePath);
+                const mtime = stats.mtime;
+                const fullDate = mtime.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+
+                // 2. Extract the uncommitted diff
+                let targetLineDiff: string[] = [];
+                try {
+                    const diffOutput = execSync(`git diff --unified=0 HEAD -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString();
+                    const diffLines = diffOutput.split('\n');
+                    for (let i = 0; i < diffLines.length; i++) {
+                        const match = diffLines[i].match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+                        if (match) {
+                            const hunkNewStart = parseInt(match[1], 10);
+                            const hunkNewLen = parseInt(match[2] !== undefined ? match[2] : "1", 10);
+                            if (originalLineNumber >= hunkNewStart && originalLineNumber < (hunkNewStart + hunkNewLen)) {
+                                let currentNew = hunkNewStart;
+                                let tempDeletions: string[] = [];
+                                for (let j = i + 1; j < diffLines.length && !diffLines[j].startsWith('@@'); j++) {
+                                    const dLine = diffLines[j];
+                                    if (dLine.startsWith('-')) tempDeletions.push(dLine); 
+                                    else if (dLine.startsWith('+')) {
+                                        if (currentNew === originalLineNumber) {
+                                            targetLineDiff.push(...tempDeletions);
+                                            targetLineDiff.push(dLine);
+                                            break; 
+                                        }
+                                        currentNew++;
+                                        tempDeletions = []; 
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 3. FETCH PREVIOUS COMMIT DATA (What the line was before you edited it)
+                let prevHashFull = "";
+                let prevShortHash = "";
+                let prevAuthor = "Unknown";
+                let prevDateStr = "";
+                let prevFullDate = "";
+                let prevSummary = "";
+                let prevBranch = "Unknown";
+                let prevParentHash = "0000000";
+                let prevDiffText = "";
+
+                try {
+                    const prevBlameOutput = execSync(`git blame -p -L ${originalLineNumber},${originalLineNumber} HEAD -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString().split('\n');
+                    
+                    // Match the first line: <hash> <original_line> <final_line> <group_lines>
+                    const prevBlameMatch = prevBlameOutput[0].match(/^([0-9a-f]{40}) (\d+) \d+ \d+/);
+                    
+                    if (prevBlameMatch) {
+                        prevHashFull = prevBlameMatch[1];
+                        const prevLineNumber = parseInt(prevBlameMatch[2], 10); // The exact line number in the old commit
+                        prevShortHash = prevHashFull.substring(0, 7);
+
+                        let prevTime = 0;
+                        for (const pLine of prevBlameOutput) {
+                            if (pLine.startsWith('author ')) prevAuthor = pLine.substring(7);
+                            else if (pLine.startsWith('author-time ')) prevTime = parseInt(pLine.substring(12), 10);
+                            else if (pLine.startsWith('summary ')) prevSummary = pLine.substring(8);
+                        }
+
+                        if (prevTime > 0) {
+                            const pDate = new Date(prevTime * 1000);
+                            const pDiffDays = Math.floor((Date.now() - pDate.getTime()) / 86400000);
+                            
+                            // Format: "1 year, 1 month ago"
+                            if (pDiffDays > 365) {
+                                const years = Math.floor(pDiffDays / 365);
+                                const months = Math.floor((pDiffDays % 365) / 30);
+                                prevDateStr = `${years} year${years > 1 ? 's' : ''}${months > 0 ? `, ${months} month${months > 1 ? 's' : ''}` : ''} ago`;
+                            } else if (pDiffDays > 30) {
+                                const months = Math.floor(pDiffDays / 30);
+                                prevDateStr = `${months} month${months > 1 ? 's' : ''} ago`;
+                            } else {
+                                prevDateStr = pDiffDays > 0 ? `${pDiffDays} days ago` : `Recently`;
+                            }
+                            prevFullDate = pDate.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+                        }
+
+                        // 3a. Get exact parent hash safely
+                        try { 
+                            const parents = execSync(`git log -1 --pretty="%P" ${prevHashFull}`, { cwd: workspaceFolder }).toString().trim().split(' ');
+                            prevParentHash = parents[0] ? parents[0].substring(0, 7) : "0000000";
+                        } catch(e) {}
+                        
+                        // 3b. Get branch name cleanly (ignoring tags, removing distance markers)
+                        try { 
+                            let branchOut = execSync(`git name-rev --name-only --exclude=tags/* ${prevHashFull}`, { cwd: workspaceFolder }).toString().trim();
+                            if (branchOut.startsWith('remotes/origin/')) branchOut = branchOut.substring(15);
+                            prevBranch = branchOut.split('~')[0].split('^')[0]; 
+                        } catch(e) {}
+
+                        // 3c. Extract the EXACT diff line(s) for the blamed line
+                        try {
+                            // --unified=0 removes all extra context lines
+                            const prevShowOutput = execSync(`git show ${prevHashFull} --unified=0 -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString().split('\n');
+                            let inRightHunk = false;
+                            let currentNewLine = 0;
+                            let localDeletions: string[] = [];
+                            let finalDiffLines: string[] = [];
+                            
+                            for (const sLine of prevShowOutput) {
+                                if (sLine.startsWith('@@')) {
+                                    const hMatch = sLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+                                    if (hMatch) {
+                                        const hunkStart = parseInt(hMatch[1], 10);
+                                        const hunkLen = parseInt(hMatch[2] !== undefined ? hMatch[2] : "1", 10);
+                                        
+                                        // Check if our old line number falls inside this specific hunk
+                                        if (prevLineNumber >= hunkStart && prevLineNumber < (hunkStart + hunkLen)) {
+                                            inRightHunk = true;
+                                            currentNewLine = hunkStart;
+                                            continue;
+                                        }
+                                    }
+                                    inRightHunk = false;
+                                } else if (inRightHunk) {
+                                    if (sLine.startsWith('diff --git')) break; // End of file diff
+                                    
+                                    if (sLine.startsWith('-')) {
+                                        // Store deletions just in case they are tied to our target line
+                                        localDeletions.push(sLine);
+                                    } else if (sLine.startsWith('+')) {
+                                        // We found a new line! Is it our exact blamed line?
+                                        if (currentNewLine === prevLineNumber) {
+                                            finalDiffLines.push(...localDeletions);
+                                            finalDiffLines.push(sLine);
+                                            break; // We found the exact line! Stop reading the massive file.
+                                        }
+                                        currentNewLine++;
+                                        localDeletions = []; // Reset deletions for the next line
+                                    }
+                                }
+                            }
+                            prevDiffText = finalDiffLines.length > 0 ? finalDiffLines.join('\n') : "No direct code changes detected.";
+                        } catch(e) {}
+                    }
+                } catch(e) {}
+
+                // --- Fetch current state for the Uncommitted section ---
+                let headHash = "HEAD";
+                let workingTreeHash = "0000000";
+                let branchName = "Unknown";
+                try {
+                    headHash = execSync('git rev-parse --short HEAD', { cwd: workspaceFolder }).toString().trim();
+                    workingTreeHash = execSync(`git hash-object "${filePath}"`, { cwd: workspaceFolder }).toString().trim().substring(0, 7);
+                    let bName = execSync('git rev-parse --abbrev-ref HEAD', { cwd: workspaceFolder }).toString().trim();
+                    if (bName && bName !== "HEAD") { branchName = bName; }
+                } catch (e) {}
+
+                // 4. BUILD THE COMBINED MARKDOWN POPUP
+                const md = new vscode.MarkdownString("", true);
+                md.supportHtml = true;
+                md.supportThemeIcons = true;
+                md.isTrusted = true;
+
+                // --- TOP: Uncommitted Section ---
+                md.appendMarkdown(`$(account) **You**, &nbsp;&nbsp; Just now *(${fullDate})*\n\n`);
+                md.appendMarkdown(`**Uncommitted changes**\n\n`);
+                
+                // Wire up the Working Tree action links
+                const topActionLinks: string[] = [];
+                topActionLinks.push(`$(repo) Working Tree`);
+                
+                // Uncommitted Diff Button (Passes all 0s to represent Working Tree to your command)
+                const topDiffArgs = encodeURIComponent(JSON.stringify([filePath, "0000000000000000000000000000000000000000", headHash]));
+                topActionLinks.push(`[$(git-compare)](command:mini-blame.openDiff?${topDiffArgs} "Open changes with previous revision")`);
+                
+                if (branchName && branchName !== "Unknown") {
+                    const topBranchArgs = encodeURIComponent(JSON.stringify([branchName, "Branch Name"]));
+                    topActionLinks.push(`[$(git-branch) ${branchName}](command:mini-blame.copyText?${topBranchArgs} "Copy Branch Name")`);
+                }
+                
+                const topMoreArgs = encodeURIComponent(JSON.stringify([filePath, "0000000000000000000000000000000000000000"]));
+                topActionLinks.push(`[$(ellipsis)](command:mini-blame.moreActions?${topMoreArgs} "Show more actions")`);
+
+                md.appendMarkdown(topActionLinks.join(' &nbsp;|&nbsp; ') + '\n\n');
+
+                const codeDiff = targetLineDiff.length > 0 ? targetLineDiff.join('\n') : "No direct code changes detected.";
+                md.appendCodeblock(codeDiff, 'diff');
+                
+                // Working tree footer
+                const headCopyArgs = encodeURIComponent(JSON.stringify([headHash, "HEAD SHA"]));
+                const wtCopyArgs = encodeURIComponent(JSON.stringify([workingTreeHash, "Working Tree SHA"]));
+                md.appendMarkdown(`\n<span style="color:#ffffff;">Changes &nbsp;[$(git-commit) ${headHash.substring(0, 7)}](command:mini-blame.copyText?${headCopyArgs} "Copy HEAD SHA") ⟷ [$(git-commit) ${workingTreeHash.substring(0, 7)}](command:mini-blame.copyText?${wtCopyArgs} "Copy Working Tree SHA")</span>\n`);
+
+                // --- BOTTOM: Previous Changes Section ---
+                if (prevShortHash) {
+                    md.appendMarkdown(`\n---\n\n**previous changes**\n\n`);
+                    md.appendMarkdown(`$(account) **${prevAuthor}** &nbsp;&nbsp; $(history) ${prevDateStr} *(${prevFullDate})*\n\n`);
+                    md.appendMarkdown(`${prevSummary}\n\n`);
+                    
+                    const prevActionLinks: string[] = [];
+                    
+                    // Copy SHA Button
+                    const prevShaArgs = encodeURIComponent(JSON.stringify([prevHashFull, "Commit SHA"]));
+                    prevActionLinks.push(`$(git-commit) [${prevShortHash}](command:mini-blame.copyText?${prevShaArgs} "Copy Commit SHA")`);
+
+                    // Open Diff Button
+                    const prevDiffArgs = encodeURIComponent(JSON.stringify([filePath, prevHashFull, prevParentHash]));
+                    prevActionLinks.push(`[$(git-compare)](command:mini-blame.openDiff?${prevDiffArgs} "Open changes with previous revision")`);
+
+                    // Branch Button
+                    if (prevBranch && prevBranch !== "Unknown") {
+                        const prevBranchArgs = encodeURIComponent(JSON.stringify([prevBranch, "Branch Name"]));
+                        prevActionLinks.push(`[$(git-branch) ${prevBranch}](command:mini-blame.copyText?${prevBranchArgs} "Copy Branch Name")`);
+                    }
+
+                    // More Actions Button
+                    const prevMoreArgs = encodeURIComponent(JSON.stringify([filePath, prevHashFull]));
+                    prevActionLinks.push(`[$(ellipsis)](command:mini-blame.moreActions?${prevMoreArgs} "Show more actions")`);
+
+                    md.appendMarkdown(prevActionLinks.join(' &nbsp;|&nbsp; ') + '\n\n');
+                    md.appendCodeblock(prevDiffText || "No diff available.", 'diff');
+                    
+                    // Changes Footer
+                    const prevFooterParentArgs = encodeURIComponent(JSON.stringify([prevParentHash, "Parent SHA"]));
+                    md.appendMarkdown(`\n<span style="color:#ffffff;">Changes &nbsp;[$(git-commit) ${prevParentHash.substring(0, 7)}](command:mini-blame.copyText?${prevFooterParentArgs} "Copy Parent SHA") ⟷ [$(git-commit) ${prevShortHash}](command:mini-blame.copyText?${prevShaArgs} "Copy Commit SHA")</span>`);
+                }
+
+                // 5. Render
+                editor.setDecorations(decorationType, [{
+                    range: new vscode.Range(line, editor.document.lineAt(line).text.length, line, editor.document.lineAt(line).text.length),
+                    hoverMessage: md,
+                    renderOptions: { after: { contentText: ` You, Just now • Uncommitted changes` } }
+                }]);
+
+                statusBarItem.text = `$(git-commit) You, Just now`;
+                statusBarItem.tooltip = `Uncommitted changes`;
+                statusBarItem.show();
+                
+                return;
             }
 
             // --- 4. FETCH METADATA ---
@@ -224,7 +477,7 @@ export function activate(context: vscode.ExtensionContext) {
             
             // Apply the inline Ghost Text at the end of the line
             editor.setDecorations(decorationType, [{
-                range: new vscode.Range(line, 0, line, editor.document.lineAt(line).text.length),
+                range: new vscode.Range(line, editor.document.lineAt(line).text.length, line, editor.document.lineAt(line).text.length),
                 hoverMessage: md, // Attach our Markdown string to the hover event
                 renderOptions: { after: { contentText: ` ${authorText}, ${relDate} • ${subject.substring(0, 50)}${subject.length > 50 ? '...' : ''}` } }
             }]);
