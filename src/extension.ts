@@ -25,7 +25,10 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-// --- 2. EVENT LISTENERS ---
+    // --- 2. EVENT LISTENERS ---
+
+    // Create a timer variable to manage our 1-second debounce delay
+    let debounceTimer: NodeJS.Timeout | undefined;
 
     // If a file is already open when the extension starts, run the tracker immediately
     if (vscode.window.activeTextEditor) {
@@ -34,31 +37,51 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Trigger whenever the user switches between different file tabs
     vscode.window.onDidChangeActiveTextEditor(editor => {
-        if (editor) updateDecoration(editor);
-        else statusBarItem.hide(); // Hide status bar if no text editor is active (e.g., settings page)
+        if (editor) {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            updateDecoration(editor);
+        } else {
+            statusBarItem.hide(); 
+        }
     });
 
-    // Trigger whenever the user clicks around or moves their cursor inside the current file
-    vscode.window.onDidChangeTextEditorSelection(e => updateDecoration(e.textEditor));
+    // Triggered when cursor moves (via mouse click or keyboard arrows)
+    vscode.window.onDidChangeTextEditorSelection(e => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        
+        // Wait exactly 1 second (1000ms) after the cursor settles before showing blame
+        debounceTimer = setTimeout(() => {
+            updateDecoration(e.textEditor);
+        }, 1000);
+    });
 
-    // Hide the blame data the exact millisecond the user starts typing
+    // Hide the blame data the exact millisecond the user modifies text
     vscode.workspace.onDidChangeTextDocument(e => {
         const editor = vscode.window.activeTextEditor;
         if (editor && e.document === editor.document) {
-            // Clear the stale decorations and status bar while they are actively editing
+            // Instantly clear the UI while typing
             editor.setDecorations(decorationType, []);
             statusBarItem.hide();
+
+            // Destroy the current timer to prevent the blinking effect
+            if (debounceTimer) clearTimeout(debounceTimer); 
+
+            // The "Idle Timer" - Starts a fresh 1-second countdown. 
+            // Automatically shows the updated blame exactly 1 second after you stop typing.
+            debounceTimer = setTimeout(() => {
+                updateDecoration(editor);
+            }, 1000);
         }
     });
 
-    // Force a fresh Git pull the moment the file is saved
-    vscode.workspace.onDidSaveTextDocument(document => {
-        const editor = vscode.window.activeTextEditor;
-        if (editor && document === editor.document) {
-            // Re-run the core function to fetch the newly saved Git data
-            updateDecoration(editor); 
-        }
-    });
+    // Force an instant Git pull the moment the file is explicitly saved
+    // vscode.workspace.onDidSaveTextDocument(document => {
+    //     const editor = vscode.window.activeTextEditor;
+    //     if (editor && document === editor.document) { 
+    //         if (debounceTimer) clearTimeout(debounceTimer);
+    //         updateDecoration(editor); 
+    //     }
+    // });
 
     /**
      * Core function that fetches Git data for the currently selected line and updates the UI.
