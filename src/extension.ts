@@ -5,6 +5,19 @@ import * as os from 'os';
 import * as path from 'path';
 
 /**
+ * Helper to find the Git repository root (main or submodule) for a given file.
+ */
+function getGitRoot(filePath: string): string | undefined {
+    try {
+        const fileDir = path.dirname(filePath);
+        const gitRoot = execSync('git rev-parse --show-toplevel', { cwd: fileDir, encoding: 'utf8' }).toString().trim();
+        return path.resolve(gitRoot);
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * The activate function is the entry point of the extension.
  * It runs exactly once when the extension is loaded by VS Code.
  */
@@ -93,17 +106,17 @@ export function activate(context: vscode.ExtensionContext) {
         
         const filePath = editor.document.fileName;
         
-        // Find the root folder of the current workspace to use as the Git execution directory
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri)?.uri.fsPath;
+        // Find the Git repository root (main or submodule) for the file
+        const gitRoot = getGitRoot(filePath);
 
-        // Abort if the file isn't part of an open workspace
-        if (!workspaceFolder) { statusBarItem.hide(); return; }
+        // Abort if the file isn't part of a Git repository
+        if (!gitRoot) { statusBarItem.hide(); return; }
 
         try {
             // --- 3. FETCH GIT BLAME DATA ---
             
             // Execute git blame for this specific line. '--porcelain' provides machine-readable output.
-            const blameRaw = execSync(`git blame -l -L ${currentLineNumber},${currentLineNumber} --porcelain "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString();
+            const blameRaw = execSync(`git blame -l -L ${currentLineNumber},${currentLineNumber} --porcelain "${filePath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString();
             
             // The first line of porcelain output looks like: <hash> <originalLine> <currentLine> <groupSize>
             const blameParts = blameRaw.split('\n')[0].split(' ');
@@ -120,7 +133,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // 2. Extract the uncommitted diff
                 let targetLineDiff: string[] = [];
                 try {
-                    const diffOutput = execSync(`git diff --unified=0 HEAD -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString();
+                    const diffOutput = execSync(`git diff --unified=0 HEAD -- "${filePath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString();
                     const diffLines = diffOutput.split('\n');
                     for (let i = 0; i < diffLines.length; i++) {
                         const match = diffLines[i].match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
@@ -161,7 +174,7 @@ export function activate(context: vscode.ExtensionContext) {
                 let prevDiffText = "";
 
                 try {
-                    const prevBlameOutput = execSync(`git blame -p -L ${originalLineNumber},${originalLineNumber} HEAD -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString().split('\n');
+                    const prevBlameOutput = execSync(`git blame -p -L ${originalLineNumber},${originalLineNumber} HEAD -- "${filePath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString().split('\n');
                     
                     // Match the first line: <hash> <original_line> <final_line> <group_lines>
                     const prevBlameMatch = prevBlameOutput[0].match(/^([0-9a-f]{40}) (\d+) \d+ \d+/);
@@ -198,13 +211,13 @@ export function activate(context: vscode.ExtensionContext) {
 
                         // 3a. Get exact parent hash safely
                         try { 
-                            const parents = execSync(`git log -1 --pretty="%P" ${prevHashFull}`, { cwd: workspaceFolder }).toString().trim().split(' ');
+                            const parents = execSync(`git log -1 --pretty="%P" ${prevHashFull}`, { cwd: gitRoot }).toString().trim().split(' ');
                             prevParentHash = parents[0] ? parents[0].substring(0, 7) : "0000000";
                         } catch(e) {}
                         
                         // 3b. Get branch name cleanly (ignoring tags, removing distance markers)
                         try { 
-                            let branchOut = execSync(`git name-rev --name-only --exclude=tags/* ${prevHashFull}`, { cwd: workspaceFolder }).toString().trim();
+                            let branchOut = execSync(`git name-rev --name-only --exclude=tags/* ${prevHashFull}`, { cwd: gitRoot }).toString().trim();
                             if (branchOut.startsWith('remotes/origin/')) branchOut = branchOut.substring(15);
                             prevBranch = branchOut.split('~')[0].split('^')[0]; 
                         } catch(e) {}
@@ -212,7 +225,7 @@ export function activate(context: vscode.ExtensionContext) {
                         // 3c. Extract the EXACT diff line(s) for the blamed line
                         try {
                             // --unified=0 removes all extra context lines
-                            const prevShowOutput = execSync(`git show ${prevHashFull} --unified=0 -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString().split('\n');
+                            const prevShowOutput = execSync(`git show ${prevHashFull} --unified=0 -- "${filePath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString().split('\n');
                             let inRightHunk = false;
                             let currentNewLine = 0;
                             let localDeletions: string[] = [];
@@ -261,9 +274,9 @@ export function activate(context: vscode.ExtensionContext) {
                 let workingTreeHash = "0000000";
                 let branchName = "Unknown";
                 try {
-                    headHash = execSync('git rev-parse --short HEAD', { cwd: workspaceFolder }).toString().trim();
-                    workingTreeHash = execSync(`git hash-object "${filePath}"`, { cwd: workspaceFolder }).toString().trim().substring(0, 7);
-                    let bName = execSync('git rev-parse --abbrev-ref HEAD', { cwd: workspaceFolder }).toString().trim();
+                    headHash = execSync('git rev-parse --short HEAD', { cwd: gitRoot }).toString().trim();
+                    workingTreeHash = execSync(`git hash-object "${filePath}"`, { cwd: gitRoot }).toString().trim().substring(0, 7);
+                    let bName = execSync('git rev-parse --abbrev-ref HEAD', { cwd: gitRoot }).toString().trim();
                     if (bName && bName !== "HEAD") { branchName = bName; }
                 } catch (e) {}
 
@@ -355,7 +368,7 @@ export function activate(context: vscode.ExtensionContext) {
             
             // Fetch detailed metadata using a custom format string. 
             // %P=Parent, %an=AuthorName, %ae=AuthorEmail, %ar=RelativeDate, %ad=AbsoluteDate, %s=Subject, %b=Body
-            const metadataRaw = execSync(`git show -s --format="%P%n%an%n%ae%n%ar%n%ad%n%s%n%b" --date=format:"%B %d, %Y %I:%M %p" ${commitHash}`, { cwd: workspaceFolder, encoding: 'utf8' }).toString();
+            const metadataRaw = execSync(`git show -s --format="%P%n%an%n%ae%n%ar%n%ad%n%s%n%b" --date=format:"%B %d, %Y %I:%M %p" ${commitHash}`, { cwd: gitRoot, encoding: 'utf8' }).toString();
             
             // Strip out non-ASCII characters to prevent UI rendering bugs, then split by newlines
             const metadata = metadataRaw.replace(/[^\x00-\x7F]/g, "").split('\n');
@@ -391,7 +404,7 @@ export function activate(context: vscode.ExtensionContext) {
             let branchName = "";
             try {
                 // Find the nearest branch name associated with this commit
-                const nameRevRaw = execSync(`git name-rev --name-only --exclude=tags/* ${commitHash}`, { cwd: workspaceFolder, encoding: 'utf8' }).toString().trim();
+                const nameRevRaw = execSync(`git name-rev --name-only --exclude=tags/* ${commitHash}`, { cwd: gitRoot, encoding: 'utf8' }).toString().trim();
                 if (nameRevRaw && !nameRevRaw.includes("undefined")) {
                     // Clean up Git's output (e.g., "remotes/origin/feature~2" becomes "feature")
                     branchName = nameRevRaw.replace(/^remotes\/[^\/]+\//, '').split(/[\~^]/)[0];
@@ -406,7 +419,7 @@ export function activate(context: vscode.ExtensionContext) {
             // --- 7. EXTRACT EXACT LINE DIFF ---
             
             // Get the unified diff for this file in this specific commit with 0 context lines
-            const diffOutput = execSync(`git show --unified=0 ${commitHash} -- "${filePath}"`, { cwd: workspaceFolder, encoding: 'utf8' }).toString();
+            const diffOutput = execSync(`git show --unified=0 ${commitHash} -- "${filePath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString();
             const diffLines = diffOutput.split('\n');
             let targetLineDiff: string[] = [];
             
@@ -528,15 +541,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Command: Open Side-by-Side Diff View
     context.subscriptions.push(vscode.commands.registerCommand('mini-blame.openDiff', (filePath: string, currentHash: string, parentHash: string) => {
-        const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath;
-        if (!workspace) return;
+        const gitRoot = getGitRoot(filePath);
+        if (!gitRoot) return;
         try {
             // Convert file path to relative path with forward slashes (required for Git commands)
-            const relPath = path.relative(workspace, filePath).replace(/\\/g, '/');
+            const relPath = path.relative(gitRoot, filePath).replace(/\\/g, '/');
             
             // Helper function to extract file contents at a specific hash
             const getGitFile = (hash: string) => {
-                try { return execSync(`git show ${hash}:"${relPath}"`, { cwd: workspace, encoding: 'utf8' }).toString(); } 
+                try { return execSync(`git show ${hash}:"${relPath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString(); } 
                 catch { return ""; } // Returns empty string if file didn't exist in that commit
             };
             
@@ -553,13 +566,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Command: Open Old File (Triggered via More Actions)
     context.subscriptions.push(vscode.commands.registerCommand('mini-blame.openOldFile', async (filePath: string, commitHash: string) => {
-        const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath;
-        if (!workspace) return;
+        const gitRoot = getGitRoot(filePath);
+        if (!gitRoot) return;
         try {
-            const relPath = path.relative(workspace, filePath).replace(/\\/g, '/');
+            const relPath = path.relative(gitRoot, filePath).replace(/\\/g, '/');
             
             // Extract the entire file as it existed in this specific commit
-            const fileContent = execSync(`git show ${commitHash}:"${relPath}"`, { cwd: workspace, encoding: 'utf8' }).toString();
+            const fileContent = execSync(`git show ${commitHash}:"${relPath}"`, { cwd: gitRoot, encoding: 'utf8' }).toString();
             
             // Write it to a temporary file
             const tmpPath = path.join(os.tmpdir(), `${commitHash.substring(0,7)}_${path.basename(filePath)}`);
