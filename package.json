@@ -2,7 +2,7 @@
   "name": "mini-blame",
   "displayName": "mini-blame",
   "description": "",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "bhargav-vadaliya",
   "icon": "mini-blame_icon.png",
   "engines": {
@@ -32,8 +32,36 @@
       {
         "command": "mini-blame.openOldFile",
         "title": "Open Old File"
+      },
+      {
+        "command": "mini-blame.showCommitDetails",
+        "title": "Show Commit Details"
+      },
+      {
+        "command": "mini-blame.showLineHistory",
+        "title": "Show Line History"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Mini Blame",
+      "properties": {
+        "mini-blame.debounceDelay": {
+          "type": "integer",
+          "default": 200,
+          "description": "The delay in milliseconds before showing blame annotations after the cursor settles."
+        },
+        "mini-blame.annotationFormat": {
+          "type": "string",
+          "default": "${author}, ${relDate} • ${subject}",
+          "description": "Template for inline blame annotations. Placeholders: ${author}, ${email}, ${relDate}, ${fullDate}, ${subject}, ${hash}."
+        },
+        "mini-blame.ignoreWhitespace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ignore whitespace differences when running git blame and git diff."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
